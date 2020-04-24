@@ -5,6 +5,9 @@ import csv
 from PIL import Image, ImageDraw
 import cv2
 from matplotlib.pyplot import imshow
+import jsonstreams
+
+SCALE_FACTOR = 2
 
 
 def draw_rectangle(I, xy):
@@ -53,7 +56,7 @@ def calc_iou(A, B):
 assert(calc_iou([0, 0, 10, 10], [5, 5, 15, 15]) == 25 / 175)
 
 
-def run_nms(bboxes, iou_thres=0.5):
+def run_nms(bboxes, iou_thres=0.1):
     # Assume bboxes' 4 coord is conf
     valid_bboxes = []
     bboxes = sorted(bboxes, key=lambda x:x[4], reverse=True)
@@ -61,7 +64,7 @@ def run_nms(bboxes, iou_thres=0.5):
     for bbox in bboxes:
         is_valid = True
         for valid_bbox in valid_bboxes:
-            if calc_iou(bbox, valid_bbox) > 0.1:
+            if calc_iou(bbox, valid_bbox) > iou_thres:
                 is_valid = False
                 break
         if is_valid:
@@ -102,21 +105,6 @@ def rgb_to_hsv(I):
                 h[i, j] = (60 * ((I[i, j, 0] - I[i, j, 1]) / diff[i, j]) + 240) % 360
     # Flip hue so that red is in the 180 band instead of 0, 360 band
     h  = (h + 180) % 360
-    """
-    print('h:', h[:5, :5])
-    print('s:', s[:5, :5])
-    print('v:', v[:5, :5])
-    print('h:', h)
-    print('s:', s)
-    print('v:', v)
-    if h.shape[0] > 300:
-        cv2.imshow('image', h / 2)
-        cv2.waitKey(0)
-        cv2.imshow('image', s)
-        cv2.waitKey(0)
-        cv2.imshow('image', v)
-        cv2.waitKey(0)
-    """
     return np.stack([h, s, v]).transpose([1,2,0]).astype(np.uint8)
 
 
@@ -136,9 +124,7 @@ def process_filters(img, read_only=False):
     if read_only:
         img = img.copy()
     hsv = rgb_to_hsv(img)
-    #img = np.concatenate((img, hsv), axis=2)
-    # only care about hsv
-    img = hsv[:, :, :3]
+    img = np.concatenate((img, hsv), axis=2)
     return img
 
 
@@ -148,103 +134,143 @@ def imshow_hsv(I):
     cv2_hsv[:,:,1] *= 2.55
     cv2_hsv[:,:,2] *= 2.55
     cv2_hsv = np.round(cv2_hsv).astype(np.uint8)
-    #print('viewed h:', cv2_hsv[:5, :5, 0])
-    #print('viewed s:', cv2_hsv[:5, :5, 1])
-    #print('viewed v:', cv2_hsv[:5, :5, 2])
-    #print('viewed hsv:', cv2_hsv, cv2_hsv.shape, cv2_hsv.dtype)
-    #proper_hsv = cv2.cvtColor(original_I, cv2.COLOR_RGB2HSV)
-    #print("proper hsv:", proper_hsv, proper_hsv.shape, proper_hsv.dtype)
-    #print(cv2_hsv.shape)
     cv2.imshow('image', cv2.cvtColor(cv2_hsv, cv2.COLOR_HSV2BGR))
     cv2.waitKey(0)
-    """cv2.imshow('image', cv2_hsv[:, :, 0])
-    cv2.waitKey(0)
-    cv2.imshow('image', cv2_hsv[:, :, 1])
-    cv2.waitKey(0)
-    cv2.imshow('image', cv2_hsv[:, :, 2])
-    cv2.waitKey(0)"""
+    cv2.destroyAllWindows()
 
+    
+def imshow_rgb(I, wait=False):
+    cv2.imshow('image', cv2.cvtColor(I, cv2.COLOR_RGB2BGR))
+    if wait:
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+    else:
+        cv2.waitKey(1)
+
+
+def imshow_mpl_rgb(I):
+    imshow(I)
+
+    
+def imshow_mpl_hsv(I):
+    cv2_hsv = I.copy().astype(np.float)
+    cv2_hsv[:,:,0] /= 2
+    cv2_hsv[:,:,1] *= 2.55
+    cv2_hsv[:,:,2] *= 2.55
+    cv2_hsv = np.round(cv2_hsv).astype(np.uint8)
+    imshow(cv2.cvtColor(cv2_hsv, cv2.COLOR_HSV2RGB))
 
 class Filter:
-    def __init__(self, filepath, thres, sourcepath, factor=2):
+    def __init__(self, filepath, thres, sourcepath, factor=SCALE_FACTOR):
         self.factor = factor
         rgb_source_I = np.asarray(Image.open(os.path.join(sourcepath)))
+        self.rgb_source_I = rgb_source_I
         rgb_source_I = downsample(rgb_source_I, self.factor)
         self.source_I = process_filters(rgb_source_I, read_only=True)
         rgb_ref_I = np.asarray(Image.open(os.path.join(filepath)))
+        self.rgb_ref_I = rgb_ref_I
         rgb_ref_I = downsample(rgb_ref_I, self.factor)
-        self.ref_I = normalize_image(process_filters(rgb_ref_I, read_only=True))
+        rgb_ref_I = process_filters(rgb_ref_I, read_only=True)
+        self.unnorm_rgb_ref_I = rgb_ref_I
+        print("\n", filepath, sourcepath)
+        print(rgb_ref_I[:rgb_ref_I.shape[0] // 2].mean(axis=0).mean(axis=0))
+        print(rgb_ref_I[rgb_ref_I.shape[0] // 2:].mean(axis=0).mean(axis=0))
+        self.ref_I = normalize_image(rgb_ref_I)
         self.ref_vec = self.ref_I.flatten()
         print(self.ref_I.shape, self.source_I.mean())
         self.ref_rows, self.ref_cols = self.ref_I.shape[:2]
         self.thres = thres
+        
+        # means for filtering
+        self.top_means = self.unnorm_rgb_ref_I[:self.ref_rows//2].mean(axis=0).mean(axis=0)
+        self.bottom_means = self.unnorm_rgb_ref_I[self.ref_rows//2:].mean(axis=0).mean(axis=0)
+        # rgb hsv
+        self.top_tols = [
+            [-20, 1000],
+            [-1000, 10],
+            [-1000, 10],
+            [-15, 15],
+            [-15, 1000],
+            [-15, 1000],
+        ]
+        self.bottom_tols = [
+            [-1000, 1000],
+            [-1000, 1000],
+            [-1000, 1000],
+            [-1000, 1000],
+            [-1000, 1000],
+            [-1000, 20],
+        ]
 
+
+    def test_handcrafted_filter(self, sub_mat):
+        img_top_means = sub_mat[:sub_mat.shape[0]//2].mean(axis=0).mean(axis=0)
+        img_bottom_means = sub_mat[sub_mat.shape[0]//2:].mean(axis=0).mean(axis=0)
+        
+        for i, tol in enumerate(self.top_tols):
+            if img_top_means[i] < self.top_means[i] + tol[0] or img_top_means[i] > self.top_means[i] + tol[1]:
+                return False
+        for i, tol in enumerate(self.bottom_tols):
+            if img_bottom_means[i] < self.bottom_means[i] + tol[0] or img_bottom_means[i] > self.bottom_means[i] + tol[1]:
+                return False
+        return True
 
     def get_detections(self, I):
+        heatmap = self.compute_convolution(I)
+        bboxes = self.predict_boxes(heatmap, I)
+        return bboxes
+
+    def compute_convolution(self, I):
+        """
+        This function takes an image <I>, with a template <T> already stored
+        as a class variable (both numpy arrays) 
+        and returns a heatmap where each grid represents the output produced by 
+        convolution at each location.
+        """
         # Assume I is already downsampled and processed
         # run convolution
         n_rows, n_cols = I.shape[:2]
-        bboxes = []
         confs = []
-        print(I.mean())
-        ind = 0
-        for row in range(0, int(n_rows * 0.7) - self.ref_rows, max(self.ref_rows // 10, 1)):
-            for col in range(0, n_cols - self.ref_cols, max(self.ref_cols // 10, 1)):
-                ind += 1
-                if ind % 1 != 0:
-                    continue
+        heatmap = np.zeros(I.shape[:2])
+        for row in range(0, int(n_rows) - self.ref_rows):
+            for col in range(0, n_cols - self.ref_cols):
                 sub_mat = I[row:row+self.ref_rows,
                             col:col+self.ref_cols]
-                # sub_mat = process_filters(sub_mat)
                 sub_vec = normalize_image(sub_mat.flatten())
                 conf = np.dot(sub_vec, self.ref_vec)
+                heatmap[row, col] = conf
                 confs.append(conf)
-                if conf > self.thres:
-                    ind -= 1
+        
+        print(sorted(confs)[-10:])
+        return heatmap
+        
+    def predict_boxes(self, heatmap, I):
+        '''
+        This function takes heatmap and returns the bounding boxes and associated
+        confidence scores.
+        '''
+        n_rows, n_cols = I.shape[:2]
+        bboxes = []
+        for row in range(0, int(n_rows * 0.7) - self.ref_rows):
+            for col in range(0, n_cols - self.ref_cols):
+                sub_mat = I[row:row+self.ref_rows,
+                            col:col+self.ref_cols]
+                conf = heatmap[row, col]
+                if conf > self.thres and self.test_handcrafted_filter(sub_mat):
+
                     bboxes.append([
                         row * self.factor, col * self.factor,
                         (row+self.ref_rows) * self.factor,
                         (col+self.ref_cols) * self.factor,
                         conf
                     ])
-        
-        print(sorted(confs)[-10:])
         print('num boxes:', len(bboxes))
         return bboxes
 
 
-def compute_convolution(I, T, stride=None):
-    '''
-    This function takes an image <I> and a template <T> (both numpy arrays) 
-    and returns a heatmap where each grid represents the output produced by 
-    convolution at each location. You can add optional parameters (e.g. stride, 
-    window_size, padding) to create additional functionality. 
-    '''
-    (n_rows,n_cols,n_channels) = np.shape(I)
-
-    '''
-    BEGIN YOUR CODE
-    '''
-    pass
-
-    '''
-    END YOUR CODE
-    '''
-
-
-def predict_boxes(heatmap):
-    '''
-    This function takes heatmap and returns the bounding boxes and associated
-    confidence scores.
-    '''
-    '''
-    BEGIN YOUR CODE
-    '''
-    pass
-
-    '''
-    END YOUR CODE
-    '''
+def worker(procnum, det_filter, I, return_dict):
+    '''worker function'''
+    return_dict[procnum] = det_filter.get_detections(I)
 
 
 def detect_red_light_mf(I, det_filters, factor=2):
@@ -286,10 +312,22 @@ def detect_red_light_mf(I, det_filters, factor=2):
     I = process_filters(I)
 
     bboxes = []
-    for det_filter in det_filters:
-        # Similar to predict_boxes(compute_convolution(I, T))
-        bboxes.extend(det_filter.get_detections(I))
 
+    import multiprocessing
+
+    manager = multiprocessing.Manager()
+    return_dict = manager.dict()
+    jobs = []
+    for i, det_filter in enumerate(det_filters):
+        p = multiprocessing.Process(target=worker, args=(i,det_filter,I, return_dict))
+        jobs.append(p)
+        p.start()
+
+    for proc in jobs:
+        proc.join()
+
+    for bboxes_result in return_dict.values():
+        bboxes.extend(bboxes_result)
 
     print('# bboxes before nms:', len(bboxes))
     bboxes = run_nms(bboxes)
@@ -304,8 +342,7 @@ def detect_red_light_mf(I, det_filters, factor=2):
         original_I = draw_rectangle(original_I, bbox)
         original_I = np.asarray(original_I)
 
-    cv2.imshow('image', cv2.cvtColor(original_I, cv2.COLOR_RGB2BGR))
-    cv2.waitKey(0)
+    imshow_rgb(original_I, wait=False)
 
     output = bboxes
     '''
@@ -317,74 +354,104 @@ def detect_red_light_mf(I, det_filters, factor=2):
 
     return output
 
-# Note that you are not allowed to use test data for training.
-# set the path to the downloaded data:
-data_path = '../data/RedLights2011_Medium'
 
-# set the path to load the filters csv:
-filters_path = '../data/filters'
-filters_info_filename = 'thresholds.csv'
+def get_det_filters(filters_path, filters_info_filename):
+    # get detection filters
+    det_filters = []
+    with open(os.path.join(filters_path, filters_info_filename)) as csvfile:
+        reader = csv.reader(csvfile)
+        next(reader)
+        for row in reader:
+            det_filters.append(
+                Filter(
+                    os.path.join(filters_path, row[0]),
+                    float(row[1]),
+                    os.path.join(filters_path, row[2]),
+                ))
+    return det_filters
 
-# load splits: 
-split_path = '../data/hw02_splits'
-file_names_train = np.load(os.path.join(split_path,'file_names_train.npy'))
-file_names_test = np.load(os.path.join(split_path,'file_names_test.npy'))
 
-# set a path for saving predictions:
-preds_path = '../data/hw02_preds'
-os.makedirs(preds_path, exist_ok=True) # create directory if needed
+if __name__ == '__main__':
+    # Note that you are not allowed to use test data for training.
+    # set the path to the downloaded data:
+    data_path = '../data/RedLights2011_Medium'
 
-# Set this parameter to True when you're done with algorithm development:
-done_tweaking = False
+    # set the path to load the filters csv:
+    filters_path = '../data/filters'
+    filters_info_filename = 'thresholds.csv'
 
-# get detection filters
-det_filters = []
-with open(os.path.join(filters_path, filters_info_filename)) as csvfile:
-    reader = csv.reader(csvfile)
-    next(reader)
-    # next(reader)
-    # next(reader)
-    for row in reader:
-        det_filters.append(
-            Filter(
-                os.path.join(filters_path, row[0]),
-                float(row[1]),
-                os.path.join(filters_path, row[2]),
-            ))
-'''
-Make predictions on the training set.
-'''
-preds_train = {}
-for i in range(len(file_names_train)):
-    file_names_train[i] = 'RL-062.jpg'
-    print('file name:', file_names_train[i])
-    # read image using PIL:
-    I = Image.open(os.path.join(data_path,file_names_train[i]))
+    # load splits: 
+    split_path = '../data/hw02_splits'
+    file_names_train = np.load(os.path.join(split_path,'file_names_train.npy'))
+    file_names_test = np.load(os.path.join(split_path,'file_names_test.npy'))
 
-    # convert to numpy array:
-    I = np.asarray(I)
+    # set a path for saving predictions:
+    preds_path = '../data/hw02_preds'
+    os.makedirs(preds_path, exist_ok=True) # create directory if needed
 
-    preds_train[file_names_train[i]] = detect_red_light_mf(I, det_filters)
+    # Set this parameter to True when you're done with algorithm development:
+    done_tweaking = False
 
-# save preds (overwrites any previous predictions!)
-with open(os.path.join(preds_path,'preds_train.json'),'w') as f:
-    json.dump(preds_train,f)
-
-if done_tweaking:
+    # get detection filters
+    det_filters = []
+    with open(os.path.join(filters_path, filters_info_filename)) as csvfile:
+        reader = csv.reader(csvfile)
+        next(reader)
+        # next(reader)
+        # next(reader)
+        for row in reader:
+            det_filters.append(
+                Filter(
+                    os.path.join(filters_path, row[0]),
+                    float(row[1]),
+                    os.path.join(filters_path, row[2]),
+                ))
     '''
-    Make predictions on the test set. 
+    Make predictions on the training set.
     '''
-    preds_test = {}
-    for i in range(len(file_names_test)):
-
+    preds_train = {}
+    for i in range(len(file_names_train)):
+        print('file name:', file_names_train[i])
         # read image using PIL:
-        I = Image.open(os.path.join(data_path,file_names_test[i]))
+        I = Image.open(os.path.join(data_path,file_names_train[i]))
 
         # convert to numpy array:
         I = np.asarray(I)
 
-        preds_test[file_names_test[i]] = detect_red_light_mf(I)
+        preds_train[file_names_train[i]] = detect_red_light_mf(I, det_filters)
+
+        with jsonstreams.Stream(
+            jsonstreams.Type.object,
+            fd=open(os.path.join(preds_path, 'preds_train_backup.json', 'a+')),
+            indent=2,
+            pretty=True
+        ) as s:
+            s.write(file_names_train[i], preds_train[file_names_train[i]])
 
     # save preds (overwrites any previous predictions!)
-    with open(os.path.join(preds_path,'preds_test.json'),'w') as f:
-        json.dump(preds_test,f)
+    with open(os.path.join(preds_path,'preds_train.json'),'w') as f:
+        json.dump(preds_train,f)
+
+    if done_tweaking:
+        '''
+        Make predictions on the test set. 
+        '''
+        preds_test = {}
+        for i in range(len(file_names_test)):
+
+            # read image using PIL:
+            I = Image.open(os.path.join(data_path,file_names_test[i]))
+
+            # convert to numpy array:
+            I = np.asarray(I)
+
+            preds_test[file_names_test[i]] = detect_red_light_mf(I)
+
+            with jsonstreams.Stream(jsonstreams.Type.object,
+                filename=os.path.join(preds_path, 'preds_test_backup.json')) as s:
+                s.write(file_names_test[i], preds_train[file_names_test[i]])
+
+
+        # save preds (overwrites any previous predictions!)
+        with open(os.path.join(preds_path,'preds_test.json'),'w') as f:
+            json.dump(preds_test,f)
