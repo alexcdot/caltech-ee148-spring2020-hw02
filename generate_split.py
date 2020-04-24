@@ -1,12 +1,13 @@
 import numpy as np
 import os
+import json
 
 np.random.seed(2020) # to ensure you always get the same train/test split
 
 data_path = '../data/RedLights2011_Medium'
 gts_path = '../data/hw02_annotations'
 split_path = '../data/hw02_splits'
-os.makedirs(preds_path, exist_ok=True) # create directory if needed
+os.makedirs(split_path, exist_ok=True) # create directory if needed
 
 split_test = False # set to True and run when annotations are available
 
@@ -24,6 +25,10 @@ file_names_test = []
 '''
 Your code below. 
 '''
+np.random.shuffle(file_names)
+train_len = int(len(file_names) * train_frac)
+file_names_train = file_names[:train_len]
+file_names_test = file_names[train_len:]
 
 assert (len(file_names_train) + len(file_names_test)) == len(file_names)
 assert len(np.intersect1d(file_names_train,file_names_test)) == 0
@@ -42,6 +47,14 @@ if split_test:
     '''
     Your code below. 
     '''
+    # splitting equally since I assume the files are already split in the
+    # desired ratio
+    key_list = list(gts.keys())
+    np.random.shuffle(key_list)
+    train_keys = key_list[:len(key_list) // 2]
+    test_keys = key_list[len(key_list) // 2:]
+    gts_train = {key: gts[key] for key in train_keys}
+    gts_test = {key: gts[key] for key in test_keys}
     
     with open(os.path.join(gts_path, 'annotations_train.json'),'w') as f:
         json.dump(gts_train,f)
