@@ -23,12 +23,21 @@ def compute_iou(box_1, box_2):
         right = box_1
     summed_area = ((box_1[2] - box_1[0]) * (box_1[3] - box_1[1]) +
                    (box_2[2] - box_2[0]) * (box_2[3] - box_2[1]))
+    
+    intersection_height = upper[3] - lower[1]
+    intersection_width = left[2] - right[0]
+
+    if upper[3] > lower[3]:
+        intersection_height = lower[3] - lower[1]
+    if left[2] > right[2]:
+        intersection_width = right[2] - right[0]
+
     if upper[3] - lower[1] <= 0 or left[2] - right[0] <= 0:
         iou = 0
     else:
-        intersecting_area = (upper[3] - lower[1]) * (left[2] - right[0])
+        intersecting_area = intersection_width * intersection_height
         iou = intersecting_area / (summed_area - intersecting_area)
-    assert (iou >= 0) and (iou <= 1.0)
+    assert (iou >= 0) and (iou <= 1.0), (iou, intersecting_area, box_1, box_2)
     return iou
 
 assert(compute_iou([0, 0, 10, 10], [5, 5, 15, 15]) == 25 / 175)
@@ -55,7 +64,7 @@ def compute_counts(preds, gts, iou_thr=0.5, conf_thr=0.5):
     for pred_file, pred in preds.items():
         gt = gts[pred_file]
         matched_preds = set()
-        FP += len(pred)
+        overconf_preds = set()
         FN += len(gt)
         for i in range(len(gt)):
             pred_matched = False
@@ -64,13 +73,15 @@ def compute_counts(preds, gts, iou_thr=0.5, conf_thr=0.5):
                     continue
                 iou = compute_iou(pred[j][:4], gt[i])
                 # print(i, j, iou)
-                if iou >= iou_thr and pred[j][4] >= conf_thr:
-                    TP += 1
-                    FP -= 1
-                    FN -= 1
-                    pred_matched = True
-                    matched_preds.add(j)
-                    break
+                if pred[j][4] >= conf_thr:
+                    if iou >= iou_thr:
+                        TP += 1
+                        FN -= 1
+                        pred_matched = True
+                        matched_preds.add(j)
+                    else:
+                        overconf_preds.add(j)
+        FP += len(overconf_preds.difference(matched_preds))
     '''
     END YOUR CODE
     '''
@@ -93,15 +104,15 @@ file_names_train = np.load(os.path.join(split_path,'file_names_train.npy'))
 file_names_test = np.load(os.path.join(split_path,'file_names_test.npy'))
 
 # Set this parameter to True when you're done with algorithm development:
-done_tweaking = False
+done_tweaking = True
 
 '''
 Load training data. 
 '''
-with open(os.path.join(preds_path,'preds_train.json'),'r') as f:
+with open(os.path.join(preds_path,'preds_weak_train.json'),'r') as f:
     preds_train = json.load(f)
     
-with open(os.path.join(gts_path, 'annotations_train.json'),'r') as f:
+with open(os.path.join(gts_path, 'formatted_annotations_students.json'),'r') as f:
     gts_train = json.load(f)
 
 if done_tweaking:
@@ -110,21 +121,26 @@ if done_tweaking:
     Load test data.
     '''
     
-    with open(os.path.join(preds_path,'preds_test.json'),'r') as f:
+    with open(os.path.join(preds_path,'preds_weak_test.json'),'r') as f:
         preds_test = json.load(f)
         
-    with open(os.path.join(gts_path, 'annotations_test.json'),'r') as f:
+    with open(os.path.join(gts_path, 'formatted_annotations_students.json'),'r') as f:
         gts_test = json.load(f)
 
 
 # For a fixed IoU threshold, vary the confidence thresholds.
 # The code below gives an example on the training set for one IoU threshold. 
 
-iou_thrs = [0.25, 0.5, 0.75]
+iou_thrs = [0.1, 0.25, 0.33, 0.5, 0.75]
 
 # using (ascending) list of confidence scores as thresholds
-confidence_thrs = np.sort(np.array([preds_train[fname][4] for fname
-    in preds_train],dtype=float))
+confs = []
+for filename in preds_train:
+    for bbox in preds_train[filename]:
+        confs.append(bbox[4])
+confidence_thrs = np.linspace(0.89, max(confs), 50)
+# np.sort(np.array([preds_train[fname][4] for fname
+#    in preds_train],dtype=float))
 
 # tp, fp, fn, pr, rc
 train_metrics = np.zeros((len(iou_thrs), len(confidence_thrs), 5))
@@ -132,7 +148,7 @@ test_metrics = np.zeros((len(iou_thrs), len(confidence_thrs), 5))
 
 for i, iou_thr in enumerate(iou_thrs):
     for j, conf_thr in enumerate(confidence_thrs):
-        train_metrics[i, j, :2] = compute_counts(
+        train_metrics[i, j, :3] = compute_counts(
             preds_train, gts_train, iou_thr=iou_thr, conf_thr=conf_thr)
 
 train_metrics[:, :, 3] = (
@@ -142,17 +158,19 @@ train_metrics[:, :, 4] = (
     train_metrics[:, :, 0] / (train_metrics[:, :, 0] + train_metrics[:, :, 2])
 )
 
-np.savetxt(os.path.join(preds_path, 'train_metrics.txt'), train_metrics)
+np.save(os.path.join(preds_path, 'train_metrics.txt'), train_metrics)
 
 for i, iou_thr in enumerate(iou_thrs):
-    plt.plot(train_metrics[:, i, 4], train_metrics[:, i, 3],
+    plt.plot(train_metrics[i, :, 4], train_metrics[i, :, 3],
              label='IOU threshold: ' + str(iou_thr))
 
-plt.title('Train PR curves')
+plt.title('Train PR curves for Weak Detector')
 plt.legend()
 plt.ylabel('Precision')
 plt.xlabel('Recall')
-plt.savefig('train_pr_curve.png')
+plt.ylim(0, 1)
+plt.xlim(0, 1)
+plt.savefig('weak_train_pr_curve.png')
 plt.show()
 # Plot training set PR curves
 
@@ -161,7 +179,7 @@ if done_tweaking:
         
     for i, iou_thr in enumerate(iou_thrs):
         for j, conf_thr in enumerate(confidence_thrs):
-            test_metrics[i, j] = compute_counts(
+            test_metrics[i, j, :3] = compute_counts(
                 preds_test, gts_test, iou_thr=iou_thr, conf_thr=conf_thr)
 
     test_metrics[:, :, 3] = (
@@ -171,15 +189,17 @@ if done_tweaking:
         test_metrics[:, :, 0] / (test_metrics[:, :, 0] + test_metrics[:, :, 2])
     )
 
-    np.savetxt(os.path.join(preds_path, 'test_metrics.txt'), test_metrics)
+    np.save(os.path.join(preds_path, 'test_metrics.txt'), test_metrics)
 
     for i, iou_thr in enumerate(iou_thrs):
-        plt.plot(test_metrics[:, i, 4], test_metrics[:, i, 3],
+        plt.plot(test_metrics[i, :, 4], test_metrics[i, :, 3],
                 label='IOU threshold: ' + str(iou_thr))
 
-    plt.title('Test PR curves')
+    plt.title('Test PR curves for Weak Detector')
     plt.legend()
     plt.ylabel('Precision')
     plt.xlabel('Recall')
-    plt.savefig('test_pr_curve.png')
+    plt.ylim(0, 1)
+    plt.xlim(0, 1)
+    plt.savefig('weak_test_pr_curve.png')
     plt.show()

@@ -145,7 +145,8 @@ def imshow_rgb(I, wait=False):
         cv2.waitKey(0)
         cv2.destroyAllWindows()
     else:
-        cv2.waitKey(1)
+        pass
+        # cv2.waitKey(1)
 
 
 def imshow_mpl_rgb(I):
@@ -163,6 +164,7 @@ def imshow_mpl_hsv(I):
 class Filter:
     def __init__(self, filepath, thres, sourcepath, factor=SCALE_FACTOR):
         self.factor = factor
+        self.filepath = filepath
         rgb_source_I = np.asarray(Image.open(os.path.join(sourcepath)))
         self.rgb_source_I = rgb_source_I
         rgb_source_I = downsample(rgb_source_I, self.factor)
@@ -215,12 +217,14 @@ class Filter:
                 return False
         return True
 
-    def get_detections(self, I):
-        heatmap = self.compute_convolution(I)
-        bboxes = self.predict_boxes(heatmap, I)
+    def get_detections(self, I, is_weak=False):
+        heatmap = self.compute_convolution(I, is_weak)
+        cv2.imshow(self.filepath, heatmap)
+        cv2.waitKey(0)
+        bboxes = self.predict_boxes(heatmap, I, is_weak)
         return bboxes
 
-    def compute_convolution(self, I):
+    def compute_convolution(self, I, is_weak):
         """
         This function takes an image <I>, with a template <T> already stored
         as a class variable (both numpy arrays) 
@@ -232,8 +236,8 @@ class Filter:
         n_rows, n_cols = I.shape[:2]
         confs = []
         heatmap = np.zeros(I.shape[:2])
-        for row in range(0, int(n_rows) - self.ref_rows):
-            for col in range(0, n_cols - self.ref_cols):
+        for row in range(0, int(n_rows) - self.ref_rows, 1 + is_weak):
+            for col in range(0, n_cols - self.ref_cols, 1 + is_weak):
                 sub_mat = I[row:row+self.ref_rows,
                             col:col+self.ref_cols]
                 sub_vec = normalize_image(sub_mat.flatten())
@@ -244,15 +248,15 @@ class Filter:
         print(sorted(confs)[-10:])
         return heatmap
         
-    def predict_boxes(self, heatmap, I):
+    def predict_boxes(self, heatmap, I, is_weak=False):
         '''
         This function takes heatmap and returns the bounding boxes and associated
         confidence scores.
         '''
         n_rows, n_cols = I.shape[:2]
         bboxes = []
-        for row in range(0, int(n_rows * 0.7) - self.ref_rows):
-            for col in range(0, n_cols - self.ref_cols):
+        for row in range(0, int(n_rows * 0.7) - self.ref_rows, 1 + is_weak):
+            for col in range(0, n_cols - self.ref_cols, 1 + is_weak):
                 sub_mat = I[row:row+self.ref_rows,
                             col:col+self.ref_cols]
                 conf = heatmap[row, col]
@@ -273,7 +277,7 @@ def worker(procnum, det_filter, I, return_dict):
     return_dict[procnum] = det_filter.get_detections(I)
 
 
-def detect_red_light_mf(I, det_filters, factor=2):
+def detect_red_light_mf(I, det_filters, factor=2, is_weak=False):
     '''
     This function takes a numpy array <I> and returns a list <output>.
     The length of <output> is the number of bounding boxes predicted for <I>. 
@@ -313,21 +317,24 @@ def detect_red_light_mf(I, det_filters, factor=2):
 
     bboxes = []
 
-    import multiprocessing
+    if is_weak:
+        bboxes = det_filters[-1].get_detections(I, is_weak=is_weak)
+    else:
+        import multiprocessing
 
-    manager = multiprocessing.Manager()
-    return_dict = manager.dict()
-    jobs = []
-    for i, det_filter in enumerate(det_filters):
-        p = multiprocessing.Process(target=worker, args=(i,det_filter,I, return_dict))
-        jobs.append(p)
-        p.start()
+        manager = multiprocessing.Manager()
+        return_dict = manager.dict()
+        jobs = []
+        for i, det_filter in enumerate(det_filters):
+            p = multiprocessing.Process(target=worker, args=(i,det_filter,I, return_dict))
+            jobs.append(p)
+            p.start()
 
-    for proc in jobs:
-        proc.join()
+        for proc in jobs:
+            proc.join()
 
-    for bboxes_result in return_dict.values():
-        bboxes.extend(bboxes_result)
+        for bboxes_result in return_dict.values():
+            bboxes.extend(bboxes_result)
 
     print('# bboxes before nms:', len(bboxes))
     bboxes = run_nms(bboxes)
@@ -342,7 +349,7 @@ def detect_red_light_mf(I, det_filters, factor=2):
         original_I = draw_rectangle(original_I, bbox)
         original_I = np.asarray(original_I)
 
-    imshow_rgb(original_I, wait=False)
+    # imshow_rgb(original_I, wait=False)
 
     output = bboxes
     '''
@@ -390,7 +397,8 @@ if __name__ == '__main__':
     os.makedirs(preds_path, exist_ok=True) # create directory if needed
 
     # Set this parameter to True when you're done with algorithm development:
-    done_tweaking = False
+    done_tweaking = True
+    is_weak = False
 
     # get detection filters
     det_filters = []
@@ -418,18 +426,19 @@ if __name__ == '__main__':
         # convert to numpy array:
         I = np.asarray(I)
 
-        preds_train[file_names_train[i]] = detect_red_light_mf(I, det_filters)
+        preds_train[file_names_train[i]] = detect_red_light_mf(I, det_filters,
+            is_weak=is_weak)
 
         with jsonstreams.Stream(
             jsonstreams.Type.object,
-            fd=open(os.path.join(preds_path, 'preds_train_backup.json', 'a+')),
+            fd=open(os.path.join(preds_path, 'preds_weak_train_backup.json'), 'a+'),
             indent=2,
             pretty=True
         ) as s:
             s.write(file_names_train[i], preds_train[file_names_train[i]])
 
     # save preds (overwrites any previous predictions!)
-    with open(os.path.join(preds_path,'preds_train.json'),'w') as f:
+    with open(os.path.join(preds_path,'preds_weak_train.json'),'w') as f:
         json.dump(preds_train,f)
 
     if done_tweaking:
@@ -445,13 +454,18 @@ if __name__ == '__main__':
             # convert to numpy array:
             I = np.asarray(I)
 
-            preds_test[file_names_test[i]] = detect_red_light_mf(I)
+            preds_test[file_names_test[i]] = detect_red_light_mf(I, det_filters,
+                is_weak=is_weak)
 
-            with jsonstreams.Stream(jsonstreams.Type.object,
-                filename=os.path.join(preds_path, 'preds_test_backup.json')) as s:
-                s.write(file_names_test[i], preds_train[file_names_test[i]])
+            with jsonstreams.Stream(
+                jsonstreams.Type.object,
+                fd=open(os.path.join(preds_path, 'preds_weak_test_backup.json'), 'a+'),
+                indent=2,
+                pretty=True
+            ) as s:
+                s.write(file_names_test[i], preds_test[file_names_test[i]])
 
 
         # save preds (overwrites any previous predictions!)
-        with open(os.path.join(preds_path,'preds_test.json'),'w') as f:
+        with open(os.path.join(preds_path,'preds_weak_test.json'),'w') as f:
             json.dump(preds_test,f)
